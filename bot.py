@@ -2,8 +2,10 @@ import os
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.enums import ChatType, ChatMemberStatus
 from pytgcalls import PyTgCalls
 from pytgcalls.types import AudioStream, AudioParameters
+from pytgcalls.types import Update
 import yt_dlp
 
 # ============ CONFIG ============
@@ -11,8 +13,16 @@ API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
+# Initialize clients
 app = Client("music_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-call = PyTgCalls(app)
+
+# PyTgCalls initialization with proper error handling
+try:
+    call = PyTgCalls(app)
+    print("✅ PyTgCalls initialized")
+except Exception as e:
+    print(f"❌ PyTgCalls error: {e}")
+    raise
 
 # Storage
 queues = {}
@@ -31,6 +41,13 @@ def main_buttons():
          InlineKeyboardButton("⏭️ Skip", callback_data="skip")],
         [InlineKeyboardButton("🔑 Login", callback_data="login"),
          InlineKeyboardButton("🚪 Logout", callback_data="logout")]
+    ])
+
+def login_buttons():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📱 Phone Login", callback_data="login_phone"),
+         InlineKeyboardButton("🔑 String Session", callback_data="login_string")],
+        [InlineKeyboardButton("◀️ Back", callback_data="back")]
     ])
 
 # ============ HELPERS ============
@@ -56,8 +73,8 @@ async def get_audio(query):
                         'title': info.get('title', 'Unknown'),
                         'url': f.get('url')
                     }
-    except:
-        pass
+    except Exception as e:
+        print(f"Audio error: {e}")
     return None
 
 async def play_next(chat_id):
@@ -66,9 +83,12 @@ async def play_next(chat_id):
     if chat_id in queues and queues[chat_id]:
         song = queues[chat_id].pop(0)
         playing[chat_id] = song
-        await call.change_stream(chat_id, AudioStream(song['url'], AudioParameters()))
-        await app.send_message(chat_id, f"▶️ **Now Playing:** {song['title']}\n👤 {song['by']}")
-        asyncio.create_task(play_next(chat_id))
+        try:
+            await call.change_stream(chat_id, AudioStream(song['url']))
+            await app.send_message(chat_id, f"▶️ **Now Playing:** {song['title']}\n👤 {song['by']}")
+            asyncio.create_task(play_next(chat_id))
+        except Exception as e:
+            print(f"Play next error: {e}")
 
 # ============ COMMANDS ============
 @app.on_message(filters.command("start"))
@@ -118,7 +138,7 @@ async def login_cmd(client, message):
             if resp:
                 users[uid]['phone'] = resp.text
                 await resp.reply_text(f"✅ **Logged in!**\n📱 {resp.text}\nUse /menu", reply_markup=main_buttons())
-        except:
+        except asyncio.TimeoutError:
             await message.reply_text("⏰ Timeout!")
     
     elif args[1] == "string" and len(args) >= 3:
@@ -142,9 +162,12 @@ async def audio_play(client, message):
         await msg.edit_text(f"✅ **Added to queue:**\n🎵 {title}")
     else:
         playing[chat_id] = song
-        await call.change_stream(chat_id, AudioStream(path, AudioParameters()))
-        await msg.edit_text(f"▶️ **Now Playing:**\n🎵 {title}", reply_markup=main_buttons())
-        asyncio.create_task(play_next(chat_id))
+        try:
+            await call.change_stream(chat_id, AudioStream(path))
+            await msg.edit_text(f"▶️ **Now Playing:**\n🎵 {title}", reply_markup=main_buttons())
+            asyncio.create_task(play_next(chat_id))
+        except Exception as e:
+            await msg.edit_text(f"❌ Error: {e}", reply_markup=main_buttons())
 
 # ============ CALLBACKS ============
 @app.on_callback_query()
@@ -156,32 +179,48 @@ async def callback_handler(client, query):
     
     await query.answer()
     
+    # Back button
+    if data == "back":
+        await query.message.edit_text("**🎵 Main Menu:**", reply_markup=main_buttons())
+    
     # Voice chat controls
-    if data == "join":
+    elif data == "join":
         try:
             await call.join_call(chat_id)
-            await query.message.edit_text("✅ **Joined Voice Chat!**", reply_markup=main_buttons())
+            await query.message.edit_text("✅ **Joined Voice Chat!**\nNow you can play music.", reply_markup=main_buttons())
+        except Exception as e:
+            await query.message.edit_text(f"❌ Error: {str(e)[:100]}", reply_markup=main_buttons())
+    
+    elif data == "leave":
+        try:
+            await call.leave_call(chat_id)
+            queues[chat_id] = []
+            playing[chat_id] = None
+            await query.message.edit_text("✅ **Left Voice Chat!**", reply_markup=main_buttons())
         except Exception as e:
             await query.message.edit_text(f"❌ Error: {e}", reply_markup=main_buttons())
     
-    elif data == "leave":
-        await call.leave_call(chat_id)
-        queues[chat_id] = []
-        playing[chat_id] = None
-        await query.message.edit_text("✅ **Left Voice Chat!**", reply_markup=main_buttons())
-    
     elif data == "pause":
-        await call.pause_stream(chat_id)
-        await query.message.edit_text("⏸️ **Paused**", reply_markup=main_buttons())
+        try:
+            await call.pause_stream(chat_id)
+            await query.message.edit_text("⏸️ **Paused**\nClick Resume to continue", reply_markup=main_buttons())
+        except Exception as e:
+            pass
     
     elif data == "resume":
-        await call.resume_stream(chat_id)
-        await query.message.edit_text("▶️ **Resumed**", reply_markup=main_buttons())
+        try:
+            await call.resume_stream(chat_id)
+            await query.message.edit_text("▶️ **Resumed**", reply_markup=main_buttons())
+        except Exception as e:
+            pass
     
     elif data == "skip":
-        await call.stop_stream(chat_id)
-        await query.message.edit_text("⏭️ **Skipped**", reply_markup=main_buttons())
-        await play_next(chat_id)
+        try:
+            await call.stop_stream(chat_id)
+            await query.message.edit_text("⏭️ **Skipped**", reply_markup=main_buttons())
+            await play_next(chat_id)
+        except Exception as e:
+            pass
     
     # Queue
     elif data == "queue":
@@ -191,11 +230,18 @@ async def callback_handler(client, query):
                 txt += f"{i}. {s['title'][:40]}\n"
             await query.message.edit_text(txt, reply_markup=main_buttons())
         else:
-            await query.message.edit_text("📋 **Queue empty!**", reply_markup=main_buttons())
+            await query.message.edit_text("📋 **Queue empty!**\nUse Play button to add songs", reply_markup=main_buttons())
     
     # Play music
     elif data == "play":
-        await query.message.edit_text("🎵 **Send YouTube link or song name:**\nExample: `Despacito`", reply_markup=main_buttons())
+        await query.message.edit_text(
+            "🎵 **Send YouTube link or song name:**\n\n"
+            "Examples:\n"
+            "• `https://youtube.com/watch?v=...`\n"
+            "• `Despacito`\n"
+            "• `Bohemian Rhapsody`",
+            reply_markup=main_buttons()
+        )
         
         try:
             resp = await app.wait_for_message(chat_id, filters=filters.text & filters.user(uid), timeout=60)
@@ -210,39 +256,66 @@ async def callback_handler(client, query):
                         if chat_id not in queues:
                             queues[chat_id] = []
                         queues[chat_id].append(song)
-                        await msg.edit_text(f"✅ **Added:** {audio['title']}", reply_markup=main_buttons())
+                        await msg.edit_text(f"✅ **Added to queue:**\n🎵 {audio['title']}\n📝 Position: {len(queues[chat_id])}", reply_markup=main_buttons())
                     else:
                         playing[chat_id] = song
-                        await call.change_stream(chat_id, AudioStream(audio['url'], AudioParameters()))
-                        await msg.edit_text(f"▶️ **Playing:** {audio['title']}", reply_markup=main_buttons())
-                        asyncio.create_task(play_next(chat_id))
+                        try:
+                            await call.change_stream(chat_id, AudioStream(audio['url']))
+                            await msg.edit_text(f"▶️ **Now Playing:**\n🎵 {audio['title']}", reply_markup=main_buttons())
+                            asyncio.create_task(play_next(chat_id))
+                        except Exception as e:
+                            await msg.edit_text(f"❌ Stream error: {e}", reply_markup=main_buttons())
                 else:
-                    await msg.edit_text("❌ **Not found!**", reply_markup=main_buttons())
-        except:
-            await query.message.edit_text("⏰ **Timeout!**", reply_markup=main_buttons())
+                    await msg.edit_text("❌ **No audio found!** Try different keywords", reply_markup=main_buttons())
+        except asyncio.TimeoutError:
+            await query.message.edit_text("⏰ **Timeout!** Please try again", reply_markup=main_buttons())
     
     # Login/Logout
     elif data == "login":
         await query.message.edit_text(
-            "🔐 **Login:**\n\n"
-            "• `/login phone` - OTP login\n"
-            "• `/login string <session>` - String login\n\n"
-            "Get string: @StringSessionBot",
+            "🔐 **Login Methods:**\n\n"
+            "**Method 1 - Phone OTP:**\n"
+            "Type: `/login phone`\n\n"
+            "**Method 2 - String Session:**\n"
+            "Type: `/login string YOUR_STRING_SESSION`\n\n"
+            "Get string session from @StringSessionBot",
             reply_markup=main_buttons()
         )
     
     elif data == "logout":
         if uid in users:
             del users[uid]
-        await query.message.edit_text("✅ **Logged out!**", reply_markup=main_buttons())
+        await query.message.edit_text("✅ **Logged out successfully!**", reply_markup=main_buttons())
 
-# ============ START ============
+# ============ START BOT ============
 async def main():
-    print("🚀 Starting bot on Python 3.11.6...")
-    await app.start()
-    await call.start()
-    print("✅ Bot is ready!")
-    await asyncio.Event().wait()
+    print("🚀 Starting Music Bot on Heroku...")
+    print(f"Python Version: 3.11.6")
+    print(f"API ID: {API_ID}")
+    
+    try:
+        await app.start()
+        print("✅ Pyrogram Client Started")
+        
+        await call.start()
+        print("✅ PyTgCalls Started")
+        
+        print("\n🎵 Bot is Ready!")
+        print("Commands:")
+        print("  /start - Start bot")
+        print("  /menu - Show menu")
+        print("  /login - Login with phone/string")
+        print("  /status - Check login status")
+        
+        await asyncio.Event().wait()
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        raise
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Bot Stopped")
+    except Exception as e:
+        print(f"❌ Fatal Error: {e}")
