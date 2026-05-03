@@ -1,568 +1,235 @@
 import os
 import asyncio
-from datetime import datetime
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.enums import ChatType, ChatMemberStatus
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioParameters, AudioQuality
-from pytgcalls.types.stream import AudioStream
+from pytgcalls.types import AudioStream, AudioParameters
 import yt_dlp
-from dotenv import load_dotenv
 
-load_dotenv()
+# ============ SETUP ============
+API_ID = int(os.environ.get("API_ID", 12345))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# ============ CONFIGURATION ============
-API_ID = int(os.getenv("API_ID", 0))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
-# Initialize bot
-app = Client("music_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 call = PyTgCalls(app)
 
 # Storage
 queues = {}
-current_streams = {}
-user_sessions = {}
+playing = {}
+users = {}  # {user_id: {"phone": "", "logged_in": True}}
 
 # ============ BUTTONS ============
-
-def main_menu():
+def buttons():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎵 Play Music", callback_data="play_menu"),
-            InlineKeyboardButton("📋 Queue", callback_data="show_queue")
-        ],
-        [
-            InlineKeyboardButton("🔊 Join VC", callback_data="join_vc"),
-            InlineKeyboardButton("⏹️ Leave VC", callback_data="leave_vc")
-        ],
-        [
-            InlineKeyboardButton("🔑 Login", callback_data="login"),
-            InlineKeyboardButton("🚪 Logout", callback_data="logout")
-        ],
-        [
-            InlineKeyboardButton("⏸️ Pause", callback_data="pause"),
-            InlineKeyboardButton("▶️ Resume", callback_data="resume"),
-            InlineKeyboardButton("⏭️ Skip", callback_data="skip")
-        ],
-        [
-            InlineKeyboardButton("ℹ️ Help", callback_data="help")
-        ]
-    ])
-
-def play_menu():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎵 YouTube Link", callback_data="play_youtube"),
-            InlineKeyboardButton("🔍 Search Song", callback_data="search_song")
-        ],
-        [
-            InlineKeyboardButton("◀️ Back", callback_data="back_main")
-        ]
-    ])
-
-def login_menu():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📱 Phone Login", callback_data="login_phone"),
-            InlineKeyboardButton("🔑 String Session", callback_data="login_string")
-        ],
-        [
-            InlineKeyboardButton("◀️ Back", callback_data="back_main")
-        ]
+        [InlineKeyboardButton("🎵 Play", callback_data="play"),
+         InlineKeyboardButton("📋 Queue", callback_data="queue")],
+        [InlineKeyboardButton("🔊 Join", callback_data="join"),
+         InlineKeyboardButton("⏹️ Leave", callback_data="leave")],
+        [InlineKeyboardButton("⏸️ Pause", callback_data="pause"),
+         InlineKeyboardButton("▶️ Resume", callback_data="resume"),
+         InlineKeyboardButton("⏭️ Skip", callback_data="skip")],
+        [InlineKeyboardButton("🔑 Login", callback_data="login"),
+         InlineKeyboardButton("🚪 Logout", callback_data="logout")]
     ])
 
 # ============ HELPERS ============
-
-async def get_audio_url(query):
-    """Get audio URL from YouTube"""
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-        'noplaylist': True
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Check if it's a URL or search query
-            if 'youtube.com' in query or 'youtu.be' in query:
-                info = ydl.extract_info(query, download=False)
-            else:
-                # Search
-                info = ydl.extract_info(f"ytsearch1:{query}", download=False)
-                if 'entries' in info:
-                    info = info['entries'][0]
-            
-            # Get best audio format
-            audio_url = None
-            for f in info.get('formats', []):
-                if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
-                    audio_url = f.get('url')
-                    break
-            
-            return {
-                'title': info.get('title', 'Unknown'),
-                'url': audio_url or info.get('url'),
-                'duration': info.get('duration', 0),
-                'thumbnail': info.get('thumbnail', '')
-            }
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
+async def get_audio(query):
+    """YouTube se audio nikalta hai"""
+    ydl_opts = {'format': 'bestaudio/best', 'quiet': True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        if "youtube.com" in query or "youtu.be" in query:
+            info = ydl.extract_info(query, download=False)
+        else:
+            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+            info = info['entries'][0]
+        
+        # Audio URL find karo
+        for f in info['formats']:
+            if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
+                return {'title': info['title'], 'url': f['url']}
+    return None
 
 async def play_next(chat_id):
-    """Play next song in queue"""
+    """Queue se next song play karega"""
     await asyncio.sleep(2)
-    
     if chat_id in queues and queues[chat_id]:
-        next_song = queues[chat_id].pop(0)
-        current_streams[chat_id] = next_song
-        
-        await call.change_stream(
-            chat_id,
-            AudioStream(
-                next_song['url'],
-                AudioParameters(bitrate=AudioQuality.BITRATE_64KBPS)
-            )
-        )
-        
-        await app.send_message(
-            chat_id,
-            f"**▶️ Now Playing:**\n🎵 {next_song['title']}\n👤 Requested by: {next_song['requester']}"
-        )
-        
+        song = queues[chat_id].pop(0)
+        playing[chat_id] = song
+        await call.change_stream(chat_id, AudioStream(song['url'], AudioParameters()))
+        await app.send_message(chat_id, f"▶️ **Now Playing:** {song['title']}\n👤 {song['by']}")
         asyncio.create_task(play_next(chat_id))
-    else:
-        if chat_id in current_streams:
-            del current_streams[chat_id]
 
 # ============ COMMANDS ============
-
 @app.on_message(filters.command("start"))
-async def start_command(client: Client, message: Message):
+async def start(client, message):
     await message.reply_text(
-        "**🎵 Welcome to Voice Chat Music Bot!**\n\n"
-        "I can play music in voice chats.\n"
-        "Use buttons below to control me.\n\n"
-        "**First:** Click Login button to authenticate",
-        reply_markup=main_menu()
+        "🎵 **Music Bot**\n✅ ID Login\n✅ Voice Chat\n✅ YouTube/Recording\n\nUse Buttons 👇",
+        reply_markup=buttons()
     )
 
-@app.on_message(filters.command("menu"))
-async def menu_command(client: Client, message: Message):
-    await message.reply_text("**🎮 Control Menu:**", reply_markup=main_menu())
-
-# ============ CALLBACK HANDLERS ============
-
+# ============ BUTTON CALLBACKS ============
 @app.on_callback_query()
-async def handle_callback(client: Client, callback_query: CallbackQuery):
-    data = callback_query.data
-    user_id = callback_query.from_user.id
-    chat_id = callback_query.message.chat.id
-    username = callback_query.from_user.first_name
+async def callbacks(client, query):
+    data = query.data
+    chat_id = query.message.chat.id
+    user = query.from_user.id
     
-    await callback_query.answer()
-    
-    # ============ NAVIGATION ============
-    
-    if data == "back_main":
-        await callback_query.message.edit_text(
-            "**🎵 Main Menu:**",
-            reply_markup=main_menu()
-        )
-    
-    elif data == "play_menu":
-        await callback_query.message.edit_text(
-            "**🎵 Select Play Method:**",
-            reply_markup=play_menu()
-        )
-    
-    elif data == "help":
-        help_text = """
-**🤖 Bot Commands & Features:**
-
-/start - Start the bot
-/menu - Show menu
-
-**🎮 Features:**
-• Play YouTube music
-• Play voice messages
-• Queue system
-• Voice chat controls
-
-**🎤 Voice Chat:**
-• Join/Leave VC
-• Pause/Resume/Skip
-
-**🔐 Login System:**
-• Login with phone
-• Login with string session
-• Logout anytime
-
-**📝 How to use:**
-1. Login first
-2. Join a voice chat
-3. Play music!
-        """
-        await callback_query.message.edit_text(help_text, reply_markup=main_menu())
-    
-    # ============ QUEUE ============
-    
-    elif data == "show_queue":
-        if chat_id in queues and queues[chat_id]:
-            queue_text = "**📋 Current Queue:**\n\n"
-            for i, song in enumerate(queues[chat_id][:10], 1):
-                queue_text += f"{i}. 🎵 {song['title'][:50]}\n"
-                queue_text += f"   👤 {song['requester']}\n\n"
-            
-            if len(queues[chat_id]) > 10:
-                queue_text += f"... and {len(queues[chat_id]) - 10} more"
-            
-            await callback_query.message.edit_text(queue_text, reply_markup=main_menu())
-        else:
-            await callback_query.message.edit_text(
-                "**📋 Queue is empty!**\nUse Play button to add songs.",
-                reply_markup=main_menu()
-            )
-    
-    # ============ VOICE CHAT CONTROLS ============
-    
-    elif data == "join_vc":
+    # ===== VOICE CHAT CONTROLS =====
+    if data == "join":
         try:
             await call.join_call(chat_id)
-            await callback_query.message.edit_text(
-                "**✅ Joined Voice Chat!**\nNow you can play music.",
-                reply_markup=main_menu()
-            )
+            await query.message.edit_text("✅ **Joined Voice Chat!**", reply_markup=buttons())
         except Exception as e:
-            await callback_query.message.edit_text(
-                f"**❌ Failed to join:** `{str(e)}`\n\n"
-                f"Make sure:\n"
-                f"1. Voice chat is active\n"
-                f"2. Bot has speak permissions",
-                reply_markup=main_menu()
-            )
+            await query.message.edit_text(f"❌ Error: {e}", reply_markup=buttons())
     
-    elif data == "leave_vc":
-        try:
-            await call.leave_call(chat_id)
-            # Clear queue
-            if chat_id in queues:
-                queues[chat_id] = []
-            if chat_id in current_streams:
-                del current_streams[chat_id]
-            await callback_query.message.edit_text(
-                "**✅ Left Voice Chat!**",
-                reply_markup=main_menu()
-            )
-        except Exception as e:
-            await callback_query.message.edit_text(
-                f"**❌ Error:** `{str(e)}`",
-                reply_markup=main_menu()
-            )
+    elif data == "leave":
+        await call.leave_call(chat_id)
+        queues[chat_id] = []
+        playing[chat_id] = None
+        await query.message.edit_text("✅ **Left Voice Chat!**", reply_markup=buttons())
     
     elif data == "pause":
-        try:
-            await call.pause_stream(chat_id)
-            await callback_query.message.edit_text(
-                "**⏸️ Playback Paused**\nClick Resume to continue.",
-                reply_markup=main_menu()
-            )
-        except:
-            pass
+        await call.pause_stream(chat_id)
+        await query.answer("⏸️ Paused")
     
     elif data == "resume":
-        try:
-            await call.resume_stream(chat_id)
-            await callback_query.message.edit_text(
-                "**▶️ Playback Resumed**",
-                reply_markup=main_menu()
-            )
-        except:
-            pass
+        await call.resume_stream(chat_id)
+        await query.answer("▶️ Resumed")
     
     elif data == "skip":
-        try:
-            await call.stop_stream(chat_id)
-            await callback_query.message.edit_text(
-                "**⏭️ Skipped Current Track**",
-                reply_markup=main_menu()
-            )
-            await play_next(chat_id)
-        except:
-            pass
+        await call.stop_stream(chat_id)
+        await query.answer("⏭️ Skipped")
+        await play_next(chat_id)
     
-    # ============ PLAY METHODS ============
+    # ===== QUEUE =====
+    elif data == "queue":
+        if chat_id in queues and queues[chat_id]:
+            txt = "**📋 Queue:**\n"
+            for i, s in enumerate(queues[chat_id][:5], 1):
+                txt += f"{i}. {s['title'][:40]}\n"
+            await query.message.edit_text(txt, reply_markup=buttons())
+        else:
+            await query.message.edit_text("📋 **Queue Empty!**", reply_markup=buttons())
     
-    elif data == "play_youtube":
-        await callback_query.message.edit_text(
-            "**🎵 Send YouTube Link:**\n\n"
-            "Example: `https://youtube.com/watch?v=dQw4w9WgXcQ`\n\n"
-            "Or just send a song name: `Despacito`",
-            reply_markup=main_menu()
-        )
+    # ===== PLAY MUSIC =====
+    elif data == "play":
+        await query.message.edit_text("🎵 **Send YouTube Link or Song Name:**", reply_markup=buttons())
         
         # Wait for user response
-        try:
-            response = await client.wait_for_message(
-                chat_id,
-                filters=filters.text & filters.user(user_id),
-                timeout=60
-            )
+        resp = await app.wait_for_message(chat_id, filters=filters.text & filters.user(user), timeout=60)
+        if resp:
+            msg = await resp.reply_text("🔍 **Searching...**")
+            audio = await get_audio(resp.text)
             
-            if response:
-                msg = await response.reply_text("**🔍 Processing your request...**")
+            if audio:
+                song = {'title': audio['title'], 'url': audio['url'], 'by': query.from_user.first_name}
                 
-                audio = await get_audio_url(response.text)
-                
-                if audio:
-                    # Add to queue
+                # Agar kuch play ho raha hai to queue mein daalo
+                if chat_id in playing and playing[chat_id]:
                     if chat_id not in queues:
                         queues[chat_id] = []
-                    
-                    song_data = {
-                        'title': audio['title'],
-                        'url': audio['url'],
-                        'requester': username
-                    }
-                    
-                    # Check if something is playing
-                    if chat_id in current_streams:
-                        queues[chat_id].append(song_data)
-                        await msg.edit_text(
-                            f"**✅ Added to Queue!**\n\n"
-                            f"🎵 **Song:** {audio['title']}\n"
-                            f"📝 **Position:** {len(queues[chat_id])}\n"
-                            f"👤 **Requested by:** {username}",
-                            reply_markup=main_menu()
-                        )
-                    else:
-                        current_streams[chat_id] = song_data
-                        await msg.edit_text(
-                            f"**▶️ Now Playing!**\n\n"
-                            f"🎵 **Song:** {audio['title']}\n"
-                            f"👤 **Requested by:** {username}",
-                            reply_markup=main_menu()
-                        )
-                        
-                        # Start streaming
-                        await call.change_stream(
-                            chat_id,
-                            AudioStream(
-                                audio['url'],
-                                AudioParameters(bitrate=AudioQuality.BITRATE_64KBPS)
-                            )
-                        )
-                        
-                        # Start next song handler
-                        asyncio.create_task(play_next(chat_id))
+                    queues[chat_id].append(song)
+                    await msg.edit_text(f"✅ **Added to Queue:**\n🎵 {audio['title']}", reply_markup=buttons())
                 else:
-                    await msg.edit_text(
-                        "**❌ Could not find audio!**\n\n"
-                        "Make sure:\n"
-                        "1. Link is valid\n"
-                        "2. Video has audio\n"
-                        "3. Try another song",
-                        reply_markup=main_menu()
-                    )
-        except asyncio.TimeoutError:
-            await callback_query.message.edit_text(
-                "**⏰ Timeout!**\nPlease try again.",
-                reply_markup=main_menu()
-            )
+                    # Direct play karo
+                    playing[chat_id] = song
+                    await call.change_stream(chat_id, AudioStream(audio['url'], AudioParameters()))
+                    await msg.edit_text(f"▶️ **Now Playing:**\n🎵 {audio['title']}", reply_markup=buttons())
+                    asyncio.create_task(play_next(chat_id))
+            else:
+                await msg.edit_text("❌ **No audio found!**", reply_markup=buttons())
     
-    elif data == "search_song":
-        await callback_query.message.edit_text(
-            "**🔍 Send Song Name:**\n\n"
-            "Example: `Bohemian Rhapsody`",
-            reply_markup=main_menu()
-        )
-        
-        try:
-            response = await client.wait_for_message(
-                chat_id,
-                filters=filters.text & filters.user(user_id),
-                timeout=60
-            )
-            
-            if response:
-                msg = await response.reply_text(f"**🔍 Searching:** `{response.text}`...")
-                audio = await get_audio_url(response.text)
-                
-                if audio:
-                    if chat_id not in queues:
-                        queues[chat_id] = []
-                    
-                    song_data = {
-                        'title': audio['title'],
-                        'url': audio['url'],
-                        'requester': username
-                    }
-                    
-                    if chat_id in current_streams:
-                        queues[chat_id].append(song_data)
-                        await msg.edit_text(
-                            f"**✅ Added to Queue!**\n\n🎵 {audio['title']}",
-                            reply_markup=main_menu()
-                        )
-                    else:
-                        current_streams[chat_id] = song_data
-                        await msg.edit_text(
-                            f"**▶️ Now Playing:**\n\n🎵 {audio['title']}",
-                            reply_markup=main_menu()
-                        )
-                        
-                        await call.change_stream(
-                            chat_id,
-                            AudioStream(
-                                audio['url'],
-                                AudioParameters(bitrate=AudioQuality.BITRATE_64KBPS)
-                            )
-                        )
-                        
-                        asyncio.create_task(play_next(chat_id))
-                else:
-                    await msg.edit_text(
-                        "**❌ No results found!**\nTry different keywords.",
-                        reply_markup=main_menu()
-                    )
-        except asyncio.TimeoutError:
-            await callback_query.message.edit_text(
-                "**⏰ Timeout!**",
-                reply_markup=main_menu()
-            )
-    
-    # ============ LOGIN SYSTEM ============
-    
+    # ===== LOGIN SYSTEM =====
     elif data == "login":
-        await callback_query.message.edit_text(
-            "**🔐 Login to Your Account:**\n\n"
-            "Choose login method:",
-            reply_markup=login_menu()
+        await query.message.edit_text(
+            "🔐 **Login Options:**\n\n"
+            "1️⃣ **Phone Login:** Send `/login phone`\n"
+            "2️⃣ **String Session:** Send `/login string <session>`\n\n"
+            "Example:\n`/login +919876543210`",
+            reply_markup=buttons()
         )
-    
-    elif data == "login_phone":
-        await callback_query.message.edit_text(
-            "**📱 Phone Login:**\n\n"
-            "Send your phone number with country code:\n"
-            "Example: `+919876543210`\n\n"
-            "⚠️ **Note:** This feature is for user accounts only.",
-            reply_markup=main_menu()
-        )
-        
-        try:
-            response = await client.wait_for_message(
-                chat_id,
-                filters=filters.text & filters.user(user_id),
-                timeout=60
-            )
-            
-            if response:
-                phone = response.text
-                # Store user session (simplified)
-                user_sessions[user_id] = {"phone": phone, "logged_in": True}
-                await response.reply_text(
-                    f"**✅ Logged in successfully!**\n\n"
-                    f"📱 Phone: {phone}\n"
-                    f"Now you can use all features.",
-                    reply_markup=main_menu()
-                )
-        except asyncio.TimeoutError:
-            await callback_query.message.edit_text(
-                "**⏰ Timeout!**\nTry /start again.",
-                reply_markup=main_menu()
-            )
-    
-    elif data == "login_string":
-        await callback_query.message.edit_text(
-            "**🔑 String Session Login:**\n\n"
-            "Send your Pyrogram String Session:\n\n"
-            "How to get string session:\n"
-            "1. Use @StringSessionBot\n"
-            "2. Generate your session\n"
-            "3. Copy and paste here",
-            reply_markup=main_menu()
-        )
-        
-        try:
-            response = await client.wait_for_message(
-                chat_id,
-                filters=filters.text & filters.user(user_id),
-                timeout=60
-            )
-            
-            if response:
-                string_session = response.text
-                user_sessions[user_id] = {"string_session": string_session, "logged_in": True}
-                await response.reply_text(
-                    f"**✅ String session saved!**\n\n"
-                    f"Now you can use all features.",
-                    reply_markup=main_menu()
-                )
-        except asyncio.TimeoutError:
-            await callback_query.message.edit_text("**⏰ Timeout!**", reply_markup=main_menu())
     
     elif data == "logout":
-        if user_id in user_sessions:
-            del user_sessions[user_id]
-        await callback_query.message.edit_text(
-            "**✅ Logged out successfully!**\n\n"
-            "You can login again anytime.",
-            reply_markup=main_menu()
-        )
+        if user in users:
+            del users[user]
+        await query.message.edit_text("✅ **Logged Out!**", reply_markup=buttons())
+    
+    await query.answer()
 
-# ============ ERROR HANDLERS ============
+# ============ LOGIN COMMANDS ============
+@app.on_message(filters.command("login"))
+async def login_command(client, message):
+    user = message.from_user.id
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.reply_text("❌ **Usage:**\n`/login phone` - For OTP login\n`/login string <session>` - For string session")
+        return
+    
+    if args[1] == "phone":
+        users[user] = {"method": "phone", "status": "waiting_otp"}
+        await message.reply_text("📱 **Send your phone number with country code:**\nExample: `+919876543210`")
+        
+        # Wait for phone number
+        resp = await app.wait_for_message(message.chat.id, filters=filters.text & filters.user(user), timeout=60)
+        if resp:
+            users[user]["phone"] = resp.text
+            users[user]["logged_in"] = True
+            await resp.reply_text(f"✅ **Logged in with:** {resp.text}\nUse /menu to start bot", reply_markup=buttons())
+    
+    elif args[1] == "string" and len(args) >= 3:
+        users[user] = {"method": "string", "session": args[2], "logged_in": True}
+        await message.reply_text("✅ **String session saved!**\nUse /menu to start bot", reply_markup=buttons())
+    
+    else:
+        await message.reply_text("❌ **Invalid format!**")
 
-@app.on_message(filters.voice)
-async def handle_voice(client: Client, message: Message):
-    """Handle voice messages"""
-    await message.reply_text(
-        "🎤 **Voice message received!**\n"
-        "Use /play command to play music instead.",
-        reply_markup=main_menu()
-    )
+# ============ RECORDING PLAY (Voice Message ya Audio File) ============
+@app.on_message(filters.voice | filters.audio)
+async def play_recording(client, message):
+    chat_id = message.chat.id
+    
+    # Download audio
+    file_path = await message.download()
+    
+    song = {
+        'title': message.voice.file_name if message.voice else message.audio.file_name,
+        'url': file_path,
+        'by': message.from_user.first_name
+    }
+    
+    if chat_id in playing and playing[chat_id]:
+        if chat_id not in queues:
+            queues[chat_id] = []
+        queues[chat_id].append(song)
+        await message.reply_text(f"✅ **Added to Queue:**\n🎵 {song['title']}", reply_markup=buttons())
+    else:
+        playing[chat_id] = song
+        await call.change_stream(chat_id, AudioStream(file_path, AudioParameters()))
+        await message.reply_text(f"▶️ **Now Playing:**\n🎵 {song['title']}", reply_markup=buttons())
+        asyncio.create_task(play_next(chat_id))
 
-@app.on_message(filters.audio)
-async def handle_audio(client: Client, message: Message):
-    """Handle audio files"""
-    audio = message.audio
-    await message.reply_text(
-        f"📁 **Audio file received:**\n"
-        f"🎵 {audio.file_name}\n"
-        f"📏 Size: {audio.file_size // 1024} KB\n\n"
-        f"Use /play command to play YouTube music.",
-        reply_markup=main_menu()
-    )
+# ============ CHECK LOGIN STATUS ============
+@app.on_message(filters.command("status"))
+async def status_command(client, message):
+    user = message.from_user.id
+    if user in users and users[user].get("logged_in"):
+        await message.reply_text(f"✅ **Logged In!**\nMethod: {users[user].get('method', 'unknown')}", reply_markup=buttons())
+    else:
+        await message.reply_text("❌ **Not logged in!**\nUse /login command", reply_markup=buttons())
+
+@app.on_message(filters.command("menu"))
+async def menu_command(client, message):
+    await message.reply_text("🎮 **Menu:**", reply_markup=buttons())
 
 # ============ RUN BOT ============
-
 async def main():
-    print("🚀 Starting Music Bot...")
-    print(f"API ID: {API_ID}")
-    print(f"Bot Token: {BOT_TOKEN[:20]}...")
-    
+    print("🚀 Bot Starting...")
     await app.start()
-    print("✅ Pyrogram client started")
-    
     await call.start()
-    print("✅ PyTgCalls started")
-    
-    print("\n🎵 Bot is ready to use!")
-    print("Commands:")
-    print("  /start - Start the bot")
-    print("  /menu - Show menu")
-    print("\n💡 Bot running on Heroku...")
-    
+    print("✅ Bot Ready! Use @ your bot on Telegram")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped")
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
+    asyncio.run(main())
