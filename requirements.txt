@@ -1,5 +1,4 @@
 Pyrogram==2.0.106
-pytgcalls==5.1.1
+pytgcalls==3.0.0.dev24
 yt-dlp==2024.12.13
 python-dotenv==1.0.0
-asyncio
